@@ -5,107 +5,89 @@ import * as fs from "fs";
 import * as path from "path";
 
 const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
-    console.log("Starting deployment...\n");
+  const { deployments, getNamedAccounts } = hre;
+  const { deploy } = deployments;
+  const { deployer } = await getNamedAccounts();
+  console.log("Starting deployment...\n");
 
-    interface MerkleRootData {
-        merkleRoot: string;
-    }
+  interface MerkleRootData {
+    merkleRoot: string;
+  }
 
-    interface DeploymentInfo {
-        network: string;
-        chainId: string;
-        tokenProxy: string;
-        tokenImplementation: string;
-        airdropAddress: string;
-        tokenName: string;
-        tokenSymbol: string;
-        merkleRoot: string;
-        deployedAt: string;
+  async function main(): Promise<void> {
+    const merkleFilePath = path.join(__dirname, "../scripts/merklettree/Merkle/merkleRoot.json");
+    if (!fs.existsSync(merkleFilePath)) {
+      throw new Error(`Merkle root file not found at: ${merkleFilePath}`);
     }
+    const merkleData: MerkleRootData = JSON.parse(fs.readFileSync(merkleFilePath, "utf8"));
+    const merkleRoot = merkleData.merkleRoot;
 
-    async function main(): Promise<void> {
-        const merkleFilePath = path.join(__dirname, '../scripts/merklettree/Merkle/merkleRoot.json');
-        if (!fs.existsSync(merkleFilePath)) {
-            throw new Error(`Merkle root file not found at: ${merkleFilePath}`);
-        }
-        const merkleData: MerkleRootData = JSON.parse(
-            fs.readFileSync(merkleFilePath, 'utf8')
-        );
-        const merkleRoot = merkleData.merkleRoot;
-        
-        const TOKEN_NAME = "MyToken";
-        const TOKEN_SYMBOL = "MTK";
-        
-        console.log("Deployment parameters:");
-        console.log("Token Name:", TOKEN_NAME);
-        console.log("Token Symbol:", TOKEN_SYMBOL);
-        console.log("Merkle Root:", merkleRoot, "\n");
-        console.log("Deploying Token (Upgradeable)...");
-        const MintTokendApp = await ethers.getContractFactory("MintTokendApp");
-        const tokenProxy = await upgrades.deployProxy(
-            MintTokendApp,
-            [TOKEN_NAME, TOKEN_SYMBOL],
-            { initializer: 'initialize' }
-        );
-        await tokenProxy.waitForDeployment();
-        const tokenProxyAddress = await tokenProxy.getAddress();
-        const implementationAddress = await upgrades.erc1967.getImplementationAddress(
-            tokenProxyAddress
-        );
-        
-        console.log("Token Proxy deployed:", tokenProxyAddress);
-        console.log("Implementation at:", implementationAddress, "\n");
-        console.log("Deploying Airdrop (Simple)...");
-        const AirdropClaim = await ethers.getContractFactory("AirdropClaim");
-        const airdrop = await AirdropClaim.deploy(
-            tokenProxyAddress, 
-            merkleRoot
-        );
-        await airdrop.waitForDeployment();
-        const airdropAddress = await airdrop.getAddress();
-        console.log("Airdrop deployed:", airdropAddress, "\n");
-        console.log("Adding Airdrop as minter...");
-        const addMinterTx = await tokenProxy.setAirdrop(airdropAddress);
-        await addMinterTx.wait();
-        console.log("Airdrop added to minters whitelist");
-        
-    
-        const network = await ethers.provider.getNetwork();
-        const deploymentInfo: DeploymentInfo = {
-            network: network.name,
-            chainId: network.chainId.toString(),
-            tokenProxy: tokenProxyAddress,
-            tokenImplementation: implementationAddress,
-            airdropAddress: airdropAddress,
-            tokenName: TOKEN_NAME,
-            tokenSymbol: TOKEN_SYMBOL,
-            merkleRoot: merkleRoot,
-            deployedAt: new Date().toISOString()
-        };
-        
-        const deploymentPath = path.join(__dirname, '../data/deployment.json');
-        const dataDir = path.dirname(deploymentPath);
-        if (!fs.existsSync(dataDir)) {
-            fs.mkdirSync(dataDir, { recursive: true });
-        }
-        
-        fs.writeFileSync(
-            deploymentPath,
-            JSON.stringify(deploymentInfo, null, 2)
-        );
-        
-        console.log("Deployment info saved to:", deploymentPath);
-        console.log("\nDeployment completed!");
-        console.log("\nContract Addresses:");
-        console.log("├─ Token Proxy:", tokenProxyAddress);
-        console.log("├─ Token Logic:", implementationAddress);
-        console.log("└─ Airdrop:", airdropAddress);
-        console.log("\n Security:");
-        console.log("├─ Users claim via:", airdropAddress);
-        console.log("├─ Only Airdrop can mint via:", tokenProxyAddress);
-    }
-    
-    await main();
+    const TOKEN_NAME = "MyToken";
+    const TOKEN_SYMBOL = "MTK";
+
+    console.log("Deployment parameters:");
+    console.log("Token Name:", TOKEN_NAME);
+    console.log("Token Symbol:", TOKEN_SYMBOL);
+    console.log("Merkle Root:", merkleRoot, "\n");
+    console.log("Deploying Token (Upgradeable)...");
+    const MintTokendApp = await ethers.getContractFactory("MintTokendApp");
+    const deployToken = await deploy("MintTokendApp", {
+      contract: "MintTokendApp",
+      args: [TOKEN_NAME, TOKEN_SYMBOL],
+      from: deployer,
+      log: true,
+      autoMine: true,
+      skipIfAlreadyDeployed: false,
+    });
+    const tokenContract = await ethers.getContractAt("MintTokendApp", deployToken.address);
+    const Role_Admin = await tokenContract.DEFAULT_ADMIN_ROLE();
+    const Role_Minter = await tokenContract.MINTER_ROLE();
+    const Role_Burner = await tokenContract.BURNER_ROLE();
+    console.log("Token logic contract at:", deployToken.address, "\n");
+    console.log("Deploying Airdrop (Simple)...");
+    const AirdropClaim = await ethers.getContractFactory("AirdropClaim");
+    const deployAirdropProxy = await deploy("AirdropClaim", {
+      proxy: {
+        proxyContract: "UUPS",
+        execute: {
+          init: {
+            methodName: "initialize",
+            args: [
+              // tham số constructor của mình là gì truyền vô
+              deployToken.address,
+              merkleRoot,
+            ],
+          },
+        },
+      },
+      contract: "AirdropClaim",
+      from: deployer,
+      log: true,
+      autoMine: true,
+      skipIfAlreadyDeployed: true,
+    });
+    const implementationAddress = await upgrades.erc1967.getImplementationAddress(deployAirdropProxy.address);
+    const airdropAddress = await deployAirdropProxy.address;
+    console.log("Airdrop deployed:", airdropAddress, "\n");
+    console.log("Adding Airdrop as minter...");
+    const addMinterTx = await tokenContract.grantRole(Role_Minter, airdropAddress);
+    await addMinterTx.wait();
+    const isAdmin = await tokenContract.hasRole(Role_Admin, deployer);
+    const airdropHasMinterRole = await tokenContract.hasRole(Role_Minter, airdropAddress);
+    console.log("├─ Deployer is admin?", isAdmin);
+    console.log("└─ Airdrop has MINTER_ROLE?", airdropHasMinterRole, "\n");
+
+    console.log("\nDeployment completed!");
+    console.log("\nContract Addresses:");
+    console.log("├─ Token :", deployToken.address);
+    console.log("├─ Airdrop Logic:", implementationAddress);
+    console.log("└─ proxy Airdrop:", deployAirdropProxy.address);
+    console.log("\n Security:");
+    console.log("├─ Users claim via:", deployAirdropProxy.address);
+    console.log("├─ Only Airdrop can mint via:", deployAirdropProxy.address);
+  }
+
+  await main();
 };
 
 export default func;
